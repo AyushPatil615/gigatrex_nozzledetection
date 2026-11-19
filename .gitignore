@@ -1,0 +1,14 @@
+# Auto-generated dependency folders — not source code
+node_modules/
+__pycache__/
+*.pyc
+
+# Ultralytics cache
+.ultralytics/
+
+# Local env overrides
+.env.local
+
+# OS junk
+.DS_Store
+Thumbs.db
