@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { LiveCamera } from './components/LiveCamera';
 import {
   Scan,
@@ -57,6 +57,8 @@ export const App: React.FC = () => {
   const [demoResult, setDemoResult] = useState<DemoResult | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  // Track in-flight live-camera requests so we don't queue up
+  const liveRequestInFlight = useRef(false);
 
   const [apiUrl, setApiUrl] = useState<string>(() => {
     return localStorage.getItem('nozzle_api_url') || (import.meta as any).env?.VITE_API_URL || 'http://localhost:8000';
@@ -131,8 +133,10 @@ export const App: React.FC = () => {
 
   // ── Call real backend API with a base64 camera frame ──────────────────────
   const analyzeBase64 = async (base64: string) => {
+    // Skip if a live-camera request is already in-flight to prevent queuing
+    if (liveRequestInFlight.current) return;
+    liveRequestInFlight.current = true;
     setIsAnalyzing(true);
-    setDemoResult(null);
     setApiError(null);
     try {
       const res = await fetch(`${apiUrl}/api/detect-frame`, {
@@ -160,6 +164,7 @@ export const App: React.FC = () => {
       setBackendOnline(false);
     } finally {
       setIsAnalyzing(false);
+      liveRequestInFlight.current = false;
     }
   };
 
@@ -413,14 +418,25 @@ export const App: React.FC = () => {
                   <Eye className="w-4 h-4 text-emerald-400" /> Detection Canvas
                 </h2>
                 {demoResult && (
-                  <span className="px-2.5 py-1 rounded-md text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                    Analysis Complete
+                  <span className={`px-2.5 py-1 rounded-md text-xs font-semibold border ${
+                    isAnalyzing
+                      ? 'bg-sky-500/10 text-sky-400 border-sky-500/20'
+                      : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+                  }`}>
+                    {isAnalyzing ? 'Updating...' : 'Live Result'}
                   </span>
                 )}
               </div>
 
               <div className="flex-1 flex items-center justify-center bg-black/40 rounded-xl border border-slate-800 overflow-hidden relative min-h-[340px]">
-                {isAnalyzing && (
+                {/* Thin top-bar loading indicator during live scan (doesn't block the image) */}
+                {isAnalyzing && demoResult && (
+                  <div className="absolute top-0 left-0 right-0 h-0.5 z-20 bg-sky-500/30 overflow-hidden rounded-t-xl">
+                    <div className="h-full bg-sky-400 animate-pulse w-full" />
+                  </div>
+                )}
+                {/* Full-screen spinner only on the very first frame (no result yet) */}
+                {isAnalyzing && !demoResult && (
                   <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm gap-3">
                     <Loader2 className="w-10 h-10 animate-spin text-sky-400" />
                     <p className="text-sm font-semibold text-slate-200">Running Neural Inspection...</p>
@@ -428,8 +444,8 @@ export const App: React.FC = () => {
                   </div>
                 )}
 
-                {/* Canvas Display */}
-                {(demoResult?.imageUrl || displayImage) && !isAnalyzing ? (
+                {/* Canvas Display — keep showing last result while next frame loads */}
+                {(demoResult?.imageUrl || displayImage) ? (
                   <div className="relative w-full h-full flex items-center justify-center p-2">
                     <img
                       src={demoResult?.imageUrl || displayImage || ''}

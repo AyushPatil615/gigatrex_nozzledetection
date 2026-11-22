@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
-import { Camera, RefreshCw, Play, VideoOff, Sparkles, AlertCircle } from 'lucide-react';
+import { Camera, Play, VideoOff, Sparkles, AlertCircle, Pause } from 'lucide-react';
 
 interface LiveCameraProps {
   onFrameCapture: (base64Image: string) => Promise<void>;
@@ -16,6 +16,14 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
   const [continuousScan, setContinuousScan] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
+  const [fps, setFps] = useState(0);
+
+  // Refs for the auto-loop so we never stale-close over state
+  const loopActiveRef = useRef(false);
+  const onFrameCaptureRef = useRef(onFrameCapture);
+  useEffect(() => { onFrameCaptureRef.current = onFrameCapture; }, [onFrameCapture]);
+  const fpsCountRef = useRef(0);
+  const fpsTimerRef = useRef<any>(null);
 
   // Fetch available video input devices (external webcam, built-in webcam)
   const refreshDevices = async () => {
@@ -39,7 +47,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
     }
   };
 
-  // Start Camera Stream
+  // Start Camera Stream — also auto-enables continuous scan
   const startCamera = async (devId?: string) => {
     setCameraError(null);
     try {
@@ -63,6 +71,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
       }
       setStream(newStream);
       setCameraActive(true);
+      setContinuousScan(true); // ← auto-start live scan immediately
 
       // Re-enumerate to get labels now that permission is granted
       await refreshDevices();
@@ -77,6 +86,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
         }
         setStream(fallbackStream);
         setCameraActive(true);
+        setContinuousScan(true); // ← auto-start live scan on fallback too
         await refreshDevices();
       } catch (fallbackErr: any) {
         setCameraError(
@@ -139,23 +149,63 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
     }
   };
 
-  // Continuous Scan Loop
-  useEffect(() => {
-    let intervalId: any;
-    if (continuousScan && cameraActive) {
-      intervalId = setInterval(async () => {
-        if (!isLoading) {
-          const frame = grabFrame();
-          if (frame) {
-            await onFrameCapture(frame);
-          }
-        }
-      }, 1000); // 1 frame per second
+  // ── Self-chaining continuous scan loop ────────────────────────────────────
+  // Uses recursion instead of setInterval so the next frame only fires AFTER
+  // the backend responds — no queue build-up, no dropped frames.
+  const runLoop = useCallback(async () => {
+    if (!loopActiveRef.current) return;
+
+    const frame = grabFrame();
+    if (frame) {
+      try {
+        await onFrameCaptureRef.current(frame);
+        // Count completed frames for FPS display
+        fpsCountRef.current += 1;
+      } catch (_) {
+        // If the backend errors, wait a bit before retrying
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    } else {
+      // Video not ready yet — wait a tick
+      await new Promise((r) => setTimeout(r, 100));
     }
+
+    // Schedule next frame immediately if still active
+    if (loopActiveRef.current) {
+      requestAnimationFrame(() => runLoop());
+    }
+  }, [grabFrame]);
+
+  // Start/stop the auto-loop when continuousScan toggles
+  useEffect(() => {
+    if (continuousScan && cameraActive) {
+      loopActiveRef.current = true;
+
+      // FPS counter: count frames delivered per second
+      fpsCountRef.current = 0;
+      fpsTimerRef.current = setInterval(() => {
+        setFps(fpsCountRef.current);
+        fpsCountRef.current = 0;
+      }, 1000);
+
+      runLoop();
+    } else {
+      loopActiveRef.current = false;
+      if (fpsTimerRef.current) {
+        clearInterval(fpsTimerRef.current);
+        fpsTimerRef.current = null;
+      }
+      setFps(0);
+    }
+
     return () => {
-      if (intervalId) clearInterval(intervalId);
+      loopActiveRef.current = false;
+      if (fpsTimerRef.current) {
+        clearInterval(fpsTimerRef.current);
+        fpsTimerRef.current = null;
+      }
     };
-  }, [continuousScan, cameraActive, isLoading, grabFrame, onFrameCapture]);
+  }, [continuousScan, cameraActive, runLoop]);
 
   return (
     <div className="space-y-4">
@@ -218,8 +268,8 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
         {/* Live Indicator Overlay */}
         {cameraActive && (
           <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/60 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10 text-[11px] font-medium text-white">
-            <span className="h-2 w-2 rounded-full bg-red-500 animate-pulse"></span>
-            <span>LIVE FEED</span>
+            <span className={`h-2 w-2 rounded-full ${continuousScan ? 'bg-red-500 animate-pulse' : 'bg-amber-400'}`}></span>
+            <span>{continuousScan ? `LIVE${fps > 0 ? ` · ${fps} FPS` : ''}` : 'PAUSED'}</span>
           </div>
         )}
       </div>
@@ -227,7 +277,7 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
       {/* Camera Controls Bar */}
       {cameraActive && (
         <div className="grid grid-cols-3 gap-2">
-          {/* Snapshot Button */}
+          {/* Snapshot Button — only when paused */}
           <button
             onClick={handleSnapshot}
             disabled={isLoading || continuousScan}
@@ -236,17 +286,18 @@ export const LiveCamera: React.FC<LiveCameraProps> = ({ onFrameCapture, isLoadin
             <Camera className="w-4 h-4" /> Snap & Detect
           </button>
 
-          {/* Continuous Scan Toggle */}
+          {/* Pause / Resume Live Scan */}
           <button
             onClick={() => setContinuousScan(!continuousScan)}
             className={`py-2.5 px-3 font-semibold text-xs rounded-xl border transition flex items-center justify-center gap-1.5 ${
               continuousScan
-                ? 'bg-purple-600 text-white border-purple-500 shadow-md shadow-purple-500/25 animate-pulse'
-                : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+                : 'bg-purple-600 text-white border-purple-500 shadow-md shadow-purple-500/25 hover:bg-purple-500'
             }`}
           >
-            <Sparkles className="w-4 h-4" />
-            {continuousScan ? 'Auto-Scanning...' : 'Live Stream'}
+            {continuousScan
+              ? <><Pause className="w-4 h-4" /> Pause</>
+              : <><Sparkles className="w-4 h-4" /> Resume Live</>}
           </button>
 
           {/* Stop Camera */}
